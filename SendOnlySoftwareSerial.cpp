@@ -1,14 +1,14 @@
 /*
- 
- SendOnlySoftwareSerial - adapted from SoftwareSerial by Nick Gammon 28th June 2012
- 
-SoftwareSerial.cpp (formerly NewSoftSerial.cpp) - 
+
+SendOnlySoftwareSerial - adapted from SendOnlySoftwareSerial by Nick Gammon 30th December 2016
+
+SoftwareSerial.cpp (formerly NewSoftSerial.cpp) -
 Multi-instance software serial library for Arduino/Wiring
 -- Interrupt-driven receive and other improvements by ladyada
    (http://ladyada.net)
 -- Tuning, circular buffer, derivation from class Print/Stream,
    multi-instance support, porting to 8MHz processors,
-   various optimizations, PROGMEM delay tables, inverse logic and 
+   various optimizations, PROGMEM delay tables, inverse logic and
    direct port writing by Mikal Hart (http://www.arduiniana.org)
 -- Pin change interrupt macros by Paul Stoffregen (http://www.pjrc.com)
 -- 20MHz processor support by Garrett Mace (http://www.macetech.com)
@@ -28,6 +28,8 @@ You should have received a copy of the GNU Lesser General Public
 License along with this library; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
+The latest version of this library can always be found at
+http://arduiniana.org.
 */
 
 // When set, _DEBUG co-opts pins 11 and 13 for debugging with an
@@ -36,104 +38,23 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define _DEBUG 0
 #define _DEBUG_PIN1 11
 #define _DEBUG_PIN2 13
-// 
+//
 // Includes
-// 
+//
+#include <avr/interrupt.h>
 #include <avr/pgmspace.h>
-#include "Arduino.h"
-#include "SendOnlySoftwareSerial.h"
-//
-// Lookup table
-//
-typedef struct _DELAY_TABLE
-{
-  long baud;
-  unsigned short rx_delay_centering;
-  unsigned short rx_delay_intrabit;
-  unsigned short rx_delay_stopbit;
-  unsigned short tx_delay;
-} DELAY_TABLE;
-
-#if F_CPU == 16000000
-
-static const DELAY_TABLE PROGMEM table[] = 
-{
-  //  baud    rxcenter   rxintra    rxstop    tx
-  { 115200,   1,         17,        17,       12,    },
-  { 57600,    10,        37,        37,       33,    },
-  { 38400,    25,        57,        57,       54,    },
-  { 31250,    31,        70,        70,       68,    },
-  { 28800,    34,        77,        77,       74,    },
-  { 19200,    54,        117,       117,      114,   },
-  { 14400,    74,        156,       156,      153,   },
-  { 9600,     114,       236,       236,      233,   },
-  { 4800,     233,       474,       474,      471,   },
-  { 2400,     471,       950,       950,      947,   },
-  { 1200,     947,       1902,      1902,     1899,  },
-  { 300,      3804,      7617,      7617,     7614,  },
-};
-
-const int XMIT_START_ADJUSTMENT = 5;
-
-#elif F_CPU == 8000000
-
-static const DELAY_TABLE table[] PROGMEM = 
-{
-  //  baud    rxcenter    rxintra    rxstop  tx
-  { 115200,   1,          5,         5,      3,      },
-  { 57600,    1,          15,        15,     13,     },
-  { 38400,    2,          25,        26,     23,     },
-  { 31250,    7,          32,        33,     29,     },
-  { 28800,    11,         35,        35,     32,     },
-  { 19200,    20,         55,        55,     52,     },
-  { 14400,    30,         75,        75,     72,     },
-  { 9600,     50,         114,       114,    112,    },
-  { 4800,     110,        233,       233,    230,    },
-  { 2400,     229,        472,       472,    469,    },
-  { 1200,     467,        948,       948,    945,    },
-  { 300,      1895,       3805,      3805,   3802,   },
-};
-
-const int XMIT_START_ADJUSTMENT = 4;
-
-#elif F_CPU == 20000000
-
-// 20MHz support courtesy of the good people at macegr.com.
-// Thanks, Garrett!
-
-static const DELAY_TABLE PROGMEM table[] =
-{
-  //  baud    rxcenter    rxintra    rxstop  tx
-  { 115200,   3,          21,        21,     18,     },
-  { 57600,    20,         43,        43,     41,     },
-  { 38400,    37,         73,        73,     70,     },
-  { 31250,    45,         89,        89,     88,     },
-  { 28800,    46,         98,        98,     95,     },
-  { 19200,    71,         148,       148,    145,    },
-  { 14400,    96,         197,       197,    194,    },
-  { 9600,     146,        297,       297,    294,    },
-  { 4800,     296,        595,       595,    592,    },
-  { 2400,     592,        1189,      1189,   1186,   },
-  { 1200,     1187,       2379,      2379,   2376,   },
-  { 300,      4759,       9523,      9523,   9520,   },
-};
-
-const int XMIT_START_ADJUSTMENT = 6;
-
-#else
-
-#error This version of SendOnlySoftwareSerial supports only 20, 16 and 8MHz processors
-
-#endif
+#include <Arduino.h>
+#include <SendOnlySoftwareSerial.h>
+#include <util/delay_basic.h>
 
 //
 // Debugging
 //
 // This function generates a brief pulse
 // for debugging or measuring on an oscilloscope.
+#if _DEBUG
 inline void DebugPulse(uint8_t pin, uint8_t count)
 {
-#if _DEBUG
   volatile uint8_t *pport = portOutputRegister(digitalPinToPort(pin));
 
   uint8_t val = *pport;
@@ -142,41 +63,24 @@ inline void DebugPulse(uint8_t pin, uint8_t count)
     *pport = val | digitalPinToBitMask(pin);
     *pport = val;
   }
-#endif
 }
+#else
+inline void DebugPulse(uint8_t, uint8_t) {}
+#endif
 
 //
 // Private methods
 //
 
-/* static */ 
-inline void SendOnlySoftwareSerial::tunedDelay(uint16_t delay) { 
-  uint8_t tmp=0;
-
-  asm volatile("sbiw    %0, 0x01 \n\t"
-    "ldi %1, 0xFF \n\t"
-    "cpi %A0, 0xFF \n\t"
-    "cpc %B0, %1 \n\t"
-    "brne .-10 \n\t"
-    : "+r" (delay), "+a" (tmp)
-    : "0" (delay)
-    );
+/* static */
+inline void SendOnlySoftwareSerial::tunedDelay(uint16_t delay) {
+  _delay_loop_2(delay);
 }
-
-
-void SendOnlySoftwareSerial::tx_pin_write(uint8_t pin_state)
-{
-  if (pin_state == LOW)
-    *_transmitPortRegister &= ~_transmitBitMask;
-  else
-    *_transmitPortRegister |= _transmitBitMask;
-}
-
 
 //
 // Constructor
 //
-SendOnlySoftwareSerial::SendOnlySoftwareSerial(uint8_t transmitPin, bool inverse_logic /* = false */) : 
+SendOnlySoftwareSerial::SendOnlySoftwareSerial(uint8_t transmitPin, bool inverse_logic /* = false */) :
   _tx_delay(0),
   _inverse_logic(inverse_logic)
 {
@@ -193,11 +97,22 @@ SendOnlySoftwareSerial::~SendOnlySoftwareSerial()
 
 void SendOnlySoftwareSerial::setTX(uint8_t tx)
 {
+  // First write, then set output. If we do this the other way around,
+  // the pin would be output low for a short while before switching to
+  // output high. Now, it is input with pullup for a short while, which
+  // is fine. With inverse logic, either order is fine.
+  digitalWrite(tx, _inverse_logic ? LOW : HIGH);
   pinMode(tx, OUTPUT);
-  digitalWrite(tx, HIGH);
   _transmitBitMask = digitalPinToBitMask(tx);
   uint8_t port = digitalPinToPort(tx);
   _transmitPortRegister = portOutputRegister(port);
+}
+
+uint16_t SendOnlySoftwareSerial::subtract_cap(uint16_t num, uint16_t sub) {
+  if (num > sub)
+    return num - sub;
+  else
+    return 1;
 }
 
 //
@@ -208,15 +123,15 @@ void SendOnlySoftwareSerial::begin(long speed)
 {
   _tx_delay = 0;
 
-  for (unsigned i=0; i<sizeof(table)/sizeof(table[0]); ++i)
-  {
-    long baud = pgm_read_dword(&table[i].baud);
-    if (baud == speed)
-    {
-      _tx_delay = pgm_read_word(&table[i].tx_delay);
-      break;
-    }
-  }
+  // Precalculate the various delays, in number of 4-cycle delays
+  uint16_t bit_delay = (F_CPU / speed) / 4;
+
+  // 12 (gcc 4.8.2) or 13 (gcc 4.3.2) cycles from start bit to first bit,
+  // 15 (gcc 4.8.2) or 16 (gcc 4.3.2) cycles between bits,
+  // 12 (gcc 4.8.2) or 14 (gcc 4.3.2) cycles from last bit to stop bit
+  // These are all close enough to just use 15 cycles, since the inter-bit
+  // timings are the most critical (deviations stack 8 times)
+  _tx_delay = subtract_cap(bit_delay, 15 / 4);
 
 #if _DEBUG
   pinMode(_DEBUG_PIN1, OUTPUT);
@@ -229,6 +144,65 @@ void SendOnlySoftwareSerial::end()
 {
 }
 
+size_t SendOnlySoftwareSerial::write(uint8_t b)
+{
+  if (_tx_delay == 0) {
+    setWriteError();
+    return 0;
+  }
+
+  // By declaring these as local variables, the compiler will put them
+  // in registers _before_ disabling interrupts and entering the
+  // critical timing sections below, which makes it a lot easier to
+  // verify the cycle timings
+  volatile uint8_t *reg = _transmitPortRegister;
+  uint8_t reg_mask = _transmitBitMask;
+  uint8_t inv_mask = ~_transmitBitMask;
+  uint8_t oldSREG = SREG;
+  bool inv = _inverse_logic;
+  uint16_t delay = _tx_delay;
+
+  if (inv)
+    b = ~b;
+
+  cli();  // turn off interrupts for a clean txmit
+
+  // Write the start bit
+  if (inv)
+    *reg |= reg_mask;
+  else
+    *reg &= inv_mask;
+
+  tunedDelay(delay);
+
+  // Write each of the 8 bits
+  for (uint8_t i = 8; i > 0; --i)
+  {
+    if (b & 1) // choose bit
+      *reg |= reg_mask; // send 1
+    else
+      *reg &= inv_mask; // send 0
+
+    tunedDelay(delay);
+    b >>= 1;
+  }
+
+  // restore pin to natural state
+  if (inv)
+    *reg &= inv_mask;
+  else
+    *reg |= reg_mask;
+
+  SREG = oldSREG; // turn interrupts back on
+  tunedDelay(_tx_delay);
+
+  return 1;
+}
+
+void SendOnlySoftwareSerial::flush()
+{
+  // There is no tx buffering, simply return
+}
 
 // Read data from buffer
 int SendOnlySoftwareSerial::read()
@@ -239,61 +213,6 @@ int SendOnlySoftwareSerial::read()
 int SendOnlySoftwareSerial::available()
 {
   return 0;
-}
-
-size_t SendOnlySoftwareSerial::write(uint8_t b)
-{
-  if (_tx_delay == 0) {
-    setWriteError();
-    return 0;
-  }
-
-  uint8_t oldSREG = SREG;
-  cli();  // turn off interrupts for a clean txmit
-
-  // Write the start bit
-  tx_pin_write(_inverse_logic ? HIGH : LOW);
-  tunedDelay(_tx_delay + XMIT_START_ADJUSTMENT);
-
-  // Write each of the 8 bits
-  if (_inverse_logic)
-  {
-    for (byte mask = 0x01; mask; mask <<= 1)
-    {
-      if (b & mask) // choose bit
-        tx_pin_write(LOW); // send 1
-      else
-        tx_pin_write(HIGH); // send 0
-    
-      tunedDelay(_tx_delay);
-    }
-
-    tx_pin_write(LOW); // restore pin to natural state
-  }
-  else
-  {
-    for (byte mask = 0x01; mask; mask <<= 1)
-    {
-      if (b & mask) // choose bit
-        tx_pin_write(HIGH); // send 1
-      else
-        tx_pin_write(LOW); // send 0
-    
-      tunedDelay(_tx_delay);
-    }
-
-    tx_pin_write(HIGH); // restore pin to natural state
-  }
-
-  SREG = oldSREG; // turn interrupts back on
-  tunedDelay(_tx_delay);
-  
-  return 1;
-}
-
-void SendOnlySoftwareSerial::flush()
-{
- return;
 }
 
 int SendOnlySoftwareSerial::peek()

@@ -1,14 +1,11 @@
 /*
- 
- SendOnlySoftwareSerial - adapted from SoftwareSerial by Nick Gammon 28th June 2012
-
-SoftwareSerial.h (formerly NewSoftSerial.h) - 
+SoftwareSerial.h (formerly NewSoftSerial.h) -
 Multi-instance software serial library for Arduino/Wiring
 -- Interrupt-driven receive and other improvements by ladyada
    (http://ladyada.net)
 -- Tuning, circular buffer, derivation from class Print/Stream,
    multi-instance support, porting to 8MHz processors,
-   various optimizations, PROGMEM delay tables, inverse logic and 
+   various optimizations, PROGMEM delay tables, inverse logic and
    direct port writing by Mikal Hart (http://www.arduiniana.org)
 -- Pin change interrupt macros by Paul Stoffregen (http://www.pjrc.com)
 -- 20MHz processor support by Garrett Mace (http://www.macetech.com)
@@ -28,6 +25,8 @@ You should have received a copy of the GNU Lesser General Public
 License along with this library; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
+The latest version of this library can always be found at
+http://arduiniana.org.
 */
 
 #ifndef SendOnlySoftwareSerial_h
@@ -47,17 +46,22 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 class SendOnlySoftwareSerial : public Stream
 {
 private:
-  // per object data
   uint8_t _transmitBitMask;
   volatile uint8_t *_transmitPortRegister;
+  volatile uint8_t *_pcint_maskreg;
+  uint8_t _pcint_maskvalue;
 
+  // Expressed as 4-cycle delays (must never be 0!)
   uint16_t _tx_delay;
 
-  uint16_t _inverse_logic;
+  uint16_t _buffer_overflow:1;
+  uint16_t _inverse_logic:1;
 
   // private methods
-  void tx_pin_write(uint8_t pin_state);
   void setTX(uint8_t transmitPin);
+
+  // Return num - sub, or 1 if the result would be < 1
+  static uint16_t subtract_cap(uint16_t num, uint16_t sub);
 
   // private static method for timing
   static inline void tunedDelay(uint16_t delay);
@@ -68,14 +72,17 @@ public:
   ~SendOnlySoftwareSerial();
   void begin(long speed);
   void end();
+  bool overflow() { bool ret = _buffer_overflow; if (ret) _buffer_overflow = false; return ret; }
   int peek();
 
   virtual size_t write(uint8_t byte);
   virtual int read();
   virtual int available();
   virtual void flush();
-  
+  operator bool() { return true; }
+
   using Print::write;
+
 };
 
 // Arduino 0012 workaround
